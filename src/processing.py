@@ -1,41 +1,93 @@
+import os
 import pandas as pd
 from io import BytesIO
 from src.utilities import money_range
 
+DATA_DIR = "data"
+
+def load_excel_or_csv(source):
+    """Utility to read either an uploaded file object or a local file path (xlsx/csv)."""
+    if isinstance(source, str):
+        if source.endswith(".csv"):
+            return pd.read_csv(source)
+        return pd.read_excel(source)
+    else:
+        try:
+            return pd.read_excel(source)
+        except Exception:
+            source.seek(0)
+            return pd.read_csv(source)
+
+def process_citi_identifiers(file=None):
+    if file is None:
+        file = os.path.join(DATA_DIR, "citi_identifiers.xlsx")
+        if not os.path.exists(file):
+            file = os.path.join(DATA_DIR, "citi_identifiers.csv")
+
+    if isinstance(file, str) and not os.path.exists(file):
+        return pd.DataFrame(columns=["IDENTIFIER", "COUNTERPARTY"])
+
+    df = load_excel_or_csv(file)
+    required = ["IDENTIFIER", "COUNTERPARTY"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"Citi Identifiers are missing columns: {missing}")
+    return df[required].astype(str).apply(lambda s: s.str.strip())
+
+def process_bou_identifiers(file=None):
+    if file is None:
+        file = os.path.join(DATA_DIR, "bou_identifiers.xlsx")
+        if not os.path.exists(file):
+            file = os.path.join(DATA_DIR, "bou_identifiers.csv")
+
+    if isinstance(file, str) and not os.path.exists(file):
+        return pd.DataFrame(columns=["LOCAL BANK", "CODE"])
+
+    df = load_excel_or_csv(file)
+    required = ["LOCAL BANK", "CODE"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"BOU Identifiers are missing columns: {missing}")
+    return df[required].astype(str).apply(lambda s: s.str.strip())
+
+def save_citi_identifiers(df_or_file):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    target_path = os.path.join(DATA_DIR, "citi_identifiers.xlsx")
+    if isinstance(df_or_file, pd.DataFrame):
+        df_or_file.to_excel(target_path, index=False)
+    else:
+        # File buffer
+        df = load_excel_or_csv(df_or_file)
+        df.to_excel(target_path, index=False)
+
+def save_bou_identifiers(df_or_file):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    target_path = os.path.join(DATA_DIR, "bou_identifiers.xlsx")
+    if isinstance(df_or_file, pd.DataFrame):
+        df_or_file.to_excel(target_path, index=False)
+    else:
+        df = load_excel_or_csv(df_or_file)
+        df.to_excel(target_path, index=False)
+
 def process_cashflow(file):
-    # Read the uploaded Cash Flow workbook.
-    # The uploaded file is the RAW Cash Flow, so we perform
-    # the same cleaning that Power Query was doing.
-
     raw = pd.read_excel(file, header=None)
-
-    # Find the row containing the real Cash Flow headers.
     header_idx = None
 
     for i in range(len(raw)):
         values = [str(x).strip() for x in raw.iloc[i].tolist()]
-
         required_headers = {
-            "Amount",
-            "CashFlow date",
-            "Comment",
-            "Counterparty Name",
-            "Currency",
-            "Deal No"
+            "Amount", "CashFlow date", "Comment",
+            "Counterparty Name", "Currency", "Deal No"
         }
-
         if required_headers.issubset(set(values)):
             header_idx = i
             break
 
     if header_idx is None:
         raise ValueError(
-            "Could not find the Cash Flow headers. "
-            "Expected Amount, CashFlow date, Comment, "
-            "Counterparty Name, Currency and Deal No."
+            "Could not find Cash Flow headers: Amount, CashFlow date, Comment, Counterparty Name, Currency, Deal No."
         )
 
-    # Promote the Cash Flow header row.
     headers = [
         str(x).strip() if pd.notna(x) else f"Column{i}"
         for i, x in enumerate(raw.iloc[header_idx])
@@ -44,185 +96,52 @@ def process_cashflow(file):
     df = raw.iloc[header_idx + 1:].copy()
     df.columns = headers
 
-    # Keep the same six fields used by your Power Query.
-    needed = [
-        "Amount",
-        "CashFlow date",
-        "Comment",
-        "Counterparty Name",
-        "Currency",
-        "Deal No"
-    ]
-
+    needed = ["Amount", "CashFlow date", "Comment", "Counterparty Name", "Currency", "Deal No"]
     missing = [c for c in needed if c not in df.columns]
-
     if missing:
-        raise ValueError(
-            f"Cash Flow is missing columns after cleaning: {missing}"
-        )
+        raise ValueError(f"Cash Flow missing columns: {missing}")
 
     df = df[needed].copy()
-
-    # Data types.
     df["Amount"] = pd.to_numeric(df["Amount"], errors="coerce")
-    df["CashFlow date"] = pd.to_datetime(
-        df["CashFlow date"],
-        errors="coerce"
-    )
-
+    df["CashFlow date"] = pd.to_datetime(df["CashFlow date"], errors="coerce")
     df = df[df["Amount"].notna()].copy()
-
-    # RANGE - same logic as Power Query.
     df["RANGE"] = df["Amount"].apply(money_range)
-
-    # Direction.
-    df["DIR"] = df["Amount"].apply(
-        lambda x: "-" if x < 0 else "+"
-    )
-
-    # Deal number as text for reliable matching.
+    df["DIR"] = df["Amount"].apply(lambda x: "-" if x < 0 else "+")
     df["Deal No"] = df["Deal No"].astype(str).str.strip()
-
-    # ---------------------------------------------------------
-    # SAME-DEAL / SAME-DIRECTION ADJACENT ROW CONSOLIDATION
-    # ---------------------------------------------------------
-    #
-    # This reproduces the important part of the Power Query:
-    #
-    # If the current row and the next row have:
-    #     same Deal No
-    #     same Direction
-    #
-    # then:
-    #
-    #     Amount = Amount + next Amount
-    #
-    # ---------------------------------------------------------
 
     rows = []
     skip_next = False
-
     for i in range(len(df)):
-
         if skip_next:
             skip_next = False
             continue
 
         current = df.iloc[i].copy()
-
         if i + 1 < len(df):
-
             next_row = df.iloc[i + 1]
-
-            same_deal = (
-                str(current["Deal No"])
-                == str(next_row["Deal No"])
-            )
-
-            same_direction = (
-                current["DIR"]
-                == next_row["DIR"]
-            )
+            same_deal = str(current["Deal No"]) == str(next_row["Deal No"])
+            same_direction = current["DIR"] == next_row["DIR"]
 
             if same_deal and same_direction:
-
-                current["Amount"] = (
-                    current["Amount"]
-                    + next_row["Amount"]
-                )
-
+                current["Amount"] = current["Amount"] + next_row["Amount"]
                 skip_next = True
 
         rows.append(current)
 
     df = pd.DataFrame(rows).reset_index(drop=True)
-
-    # Recalculate RANGE after combining amounts.
     df["RANGE"] = df["Amount"].apply(money_range)
 
-    # ---------------------------------------------------------
-    # REMOVE DUPLICATES BY DEAL NUMBER + DIRECTION
-    # ---------------------------------------------------------
+    df["Ref and dir"] = df["Deal No"].astype(str) + df["DIR"].astype(str)
+    df = df.drop_duplicates(subset=["Ref and dir"], keep="first")
+    df = df.sort_values("Deal No", ascending=False, na_position="last")
+    df = df.drop(columns=["DIR", "Ref and dir"], errors="ignore")
 
-    df["Ref and dir"] = (
-        df["Deal No"].astype(str)
-        + df["DIR"].astype(str)
-    )
-
-    df = df.drop_duplicates(
-        subset=["Ref and dir"],
-        keep="first"
-    )
-
-    # Same final ordering concept as Power Query.
-    df = df.sort_values(
-        "Deal No",
-        ascending=False,
-        na_position="last"
-    )
-
-    # Remove helper columns.
-    df = df.drop(
-        columns=["DIR", "Ref and dir"],
-        errors="ignore"
-    )
-
-    # Final column order.
-    df = df[
-        [
-            "CashFlow date",
-            "Comment",
-            "RANGE",
-            "Counterparty Name",
-            "Deal No",
-            "Currency",
-            "Amount"
-        ]
-    ]
-
-    return df.reset_index(drop=True)
-
-
-def process_citi_identifiers(file):
-    df = pd.read_excel(file)
-    required = ["IDENTIFIER", "COUNTERPARTY"]
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise ValueError(f"Citi Identifiers are missing columns: {missing}")
-    return df[required].astype(str).apply(lambda s: s.str.strip())
-
-
-def process_bou_identifiers(file):
-    df = pd.read_excel(file)
-    required = ["LOCAL BANK", "CODE"]
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise ValueError(f"BOU Identifiers are missing columns: {missing}")
-    return df[required].astype(str).apply(lambda s: s.str.strip())
-
+    return df[["CashFlow date", "Comment", "RANGE", "Counterparty Name", "Deal No", "Currency", "Amount"]].reset_index(drop=True)
 
 def process_citi(file, citi_ids):
     raw = pd.read_excel(file, header=None)
-
-    # The Power Query finds currency rows, fills currency down, then promotes
-    # the relevant row as headers.
     currencies = {"USD", "EUR", "GBP", "CHF", "JPY", "AUD"}
-    current_currency = None
-    records = []
 
-    for _, r in raw.iterrows():
-        vals = list(r)
-        if len(vals) > 1:
-            c = str(vals[1]).strip() if pd.notna(vals[1]) else ""
-            if c in currencies:
-                current_currency = c
-
-        # Keep rows that look like transaction rows.
-        if len(vals) > 3 and pd.notna(vals[3]) and current_currency:
-            records.append((current_currency, vals))
-
-    # Easier and more reliable for the standard Citi export:
-    # locate the header row containing Entry Date / Transaction Amount.
     header_idx = None
     for i in range(len(raw)):
         vals = [str(x).strip() for x in raw.iloc[i].tolist()]
@@ -237,7 +156,6 @@ def process_citi(file, citi_ids):
     data = raw.iloc[header_idx + 1:].copy()
     data.columns = headers
 
-    # Fill currency using the currency markers in Column2 where available.
     currency_series = []
     current_currency = None
     for i in range(len(raw)):
@@ -248,11 +166,8 @@ def process_citi(file, citi_ids):
             currency_series.append(current_currency)
     data["CURRENCY"] = currency_series[:len(data)]
 
-    # Some exports already have a CURRENCY header; use the detected values where blank.
     if "CURRENCY" in data.columns:
         data["CURRENCY"] = data["CURRENCY"].fillna("").replace("", pd.NA)
-    else:
-        data["CURRENCY"] = pd.NA
 
     required = [
         "Entry Date", "Value Date", "Transaction Description",
@@ -269,8 +184,9 @@ def process_citi(file, citi_ids):
     data = data[data["Transaction Amount"].notna()].copy()
 
     ids = citi_ids.copy()
-    ids["IDENTIFIER"] = ids["IDENTIFIER"].astype(str).str.strip()
-    ids["COUNTERPARTY"] = ids["COUNTERPARTY"].astype(str).str.strip()
+    if not ids.empty:
+        ids["IDENTIFIER"] = ids["IDENTIFIER"].astype(str).str.strip()
+        ids["COUNTERPARTY"] = ids["COUNTERPARTY"].astype(str).str.strip()
 
     data["By Order Of / Beneficiary"] = data["By Order Of / Beneficiary"].astype(str).str.strip()
     data = data.merge(
@@ -279,7 +195,6 @@ def process_citi(file, citi_ids):
         right_on="IDENTIFIER"
     )
     data.drop(columns=["IDENTIFIER"], inplace=True, errors="ignore")
-
     data["RANGE"] = data["Transaction Amount"].apply(money_range)
 
     def irregular(row):
@@ -302,16 +217,13 @@ def process_citi(file, citi_ids):
     ]
     return data[cols].reset_index(drop=True)
 
-
 def process_bou(file, bou_ids):
     raw = pd.read_excel(file, header=None)
     raw = raw.dropna(subset=[2, 3], how="any").copy()
 
-    # Promote the first remaining row as headers, matching the Power Query approach.
     raw.columns = raw.iloc[0].tolist()
     df = raw.iloc[1:].copy()
 
-    # Remove the columns that the M query explicitly removes, when present.
     drop_cols = [
         "Entry Seq no", "Setlm agrmnt name./ batch seq no.",
         "Concurrently settled", "Balance"
@@ -322,14 +234,13 @@ def process_bou(file, bou_ids):
     if ref_col not in df.columns:
         raise ValueError(f"BOU Statement is missing '{ref_col}'.")
 
-    parts = df[ref_col].astype(str).str.split("", n=4, expand=True)
-    # Equivalent to positions {0,4}: first 4 chars and the remainder.
     df["Originator instruction reference code.1"] = df[ref_col].astype(str).str[:4]
     df["Originator instruction reference code.2"] = df[ref_col].astype(str).str[4:]
 
     ids = bou_ids.copy()
-    ids["CODE"] = ids["CODE"].astype(str).str.strip()
-    ids["LOCAL BANK"] = ids["LOCAL BANK"].astype(str).str.strip()
+    if not ids.empty:
+        ids["CODE"] = ids["CODE"].astype(str).str.strip()
+        ids["LOCAL BANK"] = ids["LOCAL BANK"].astype(str).str.strip()
 
     df["Originator instruction reference code.1"] = df["Originator instruction reference code.1"].str.strip()
     df = df.merge(
@@ -348,20 +259,17 @@ def process_bou(file, bou_ids):
     df.rename(columns={"Originator instruction reference code.2": "REF"}, inplace=True)
     return df.reset_index(drop=True)
 
-
 def build_big_statement(cashflow, citi, bou):
     cf = cashflow.copy()
     c = citi.copy()
     b = bou.copy()
 
-    # Normalize matching fields.
     cf["Currency"] = cf["Currency"].astype(str).str.strip()
     cf["Counterparty Name"] = cf["Counterparty Name"].astype(str).str.strip()
     cf["Deal No"] = cf["Deal No"].astype(str).str.strip()
     c["COUNTERPARTY"] = c["COUNTERPARTY"].astype(str).str.strip()
     c["CURRENCY"] = c["CURRENCY"].astype(str).str.strip()
 
-    # Citi receipt matching: Currency + Amount + Counterparty.
     receipt_counts = []
     for _, row in cf.iterrows():
         matches = c[
@@ -377,7 +285,6 @@ def build_big_statement(cashflow, citi, bou):
         for a, cur, n in zip(cf["Amount"], cf["Currency"], receipt_counts)
     ]
 
-    # Citi paid matching: customer reference contains Deal No.
     customer_refs = c["Customer Reference"].astype(str).tolist()
     paid_status = []
     for _, row in cf.iterrows():
@@ -389,21 +296,12 @@ def build_big_statement(cashflow, citi, bou):
             paid_status.append("Paid" if found else "Not Paid")
     cf["CITI PAID STATUS"] = paid_status
 
-    # Business rules from the M code.
     def citi_status(row):
         cp = str(row["Counterparty Name"])
         up = cp.upper()
-        if "ZEAL" in cp:
+        if "ZEAL" in cp or "HYDERY" in up or "UNIMONI" in up or "ECONOMIC" in up:
             return "Internal"
-        if "HYDERY" in up:
-            return "Internal"
-        if "UNIMONI" in up:
-            return "Internal"
-        if "ECONOMIC" in up:
-            return "Internal"
-        if "PRIDE" in up:
-            return "CHECK BOU"
-        if "SALAAM" in up:
+        if "PRIDE" in up or "SALAAM" in up:
             return "CHECK BOU"
         if pd.notna(row["CITI RECEIVE STATUS"]):
             return row["CITI RECEIVE STATUS"]
@@ -413,7 +311,6 @@ def build_big_statement(cashflow, citi, bou):
 
     cf["CITIBANK PAYMENT STATUS"] = cf.apply(citi_status, axis=1)
 
-    # Citi London special handling.
     london_counts = []
     for _, row in cf.iterrows():
         matches = c[
@@ -428,28 +325,22 @@ def build_big_statement(cashflow, citi, bou):
         ("Not Received" if n == 0 else "Received" if n == 1 else f"{n}-Received")
         if cp == "Citibank N.A. London.-UG" and status == "Not Received"
         else None
-        for cp, status, n in zip(
-            cf["Counterparty Name"], cf["CITIBANK PAYMENT STATUS"], london_counts
-        )
+        for cp, status, n in zip(cf["Counterparty Name"], cf["CITIBANK PAYMENT STATUS"], london_counts)
     ]
 
     cf["citilondon paid status"] = [
         ("Not Paid" if n == 0 else "Paid" if n == 1 else f"Paid Multiple-{n}")
         if cp == "Citibank N.A. London.-UG" and status == "Not Paid"
         else None
-        for cp, status, n in zip(
-            cf["Counterparty Name"], cf["CITIBANK PAYMENT STATUS"], london_counts
-        )
+        for cp, status, n in zip(cf["Counterparty Name"], cf["CITIBANK PAYMENT STATUS"], london_counts)
     ]
 
     cf["CITI"] = cf["CITILONDON RECIEVED"].combine_first(
         cf["citilondon paid status"]
     ).combine_first(cf["CITIBANK PAYMENT STATUS"])
 
-    # BOU matching for UGX.
     bou_counterparty = b["COUNTERPARTY"].astype(str).str.strip() if "COUNTERPARTY" in b.columns else pd.Series(dtype=str)
     bou_credit = pd.to_numeric(b["Credit"], errors="coerce") if "Credit" in b.columns else pd.Series(dtype=float)
-    bou_debit = pd.to_numeric(b["Debit"], errors="coerce") if "Debit" in b.columns else pd.Series(dtype=float)
     bou_refs = b["REF"].astype(str).tolist() if "REF" in b.columns else []
 
     bou_paid = []
@@ -471,11 +362,8 @@ def build_big_statement(cashflow, citi, bou):
 
     cf["BOU PAID"] = bou_paid
     cf["BOU RECEIVED"] = bou_received
-    cf["BOU STATUS"] = [
-        p if p is not None else r for p, r in zip(bou_paid, bou_received)
-    ]
+    cf["BOU STATUS"] = [p if p is not None else r for p, r in zip(bou_paid, bou_received)]
 
-    # Final general status.
     cf["GEN STATUS"] = [
         bou if pd.notna(bou) and bou not in ("", "None") else citi
         for bou, citi in zip(cf["BOU STATUS"], cf["CITI"])

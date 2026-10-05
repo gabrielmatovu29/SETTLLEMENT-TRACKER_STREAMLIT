@@ -1,66 +1,48 @@
 import streamlit as st
-from src.utilities import apply_style, top_nav
+from src.utilities import apply_style#, top_nav
 from src.processing import (
     process_cashflow, process_citi_identifiers, process_bou_identifiers,
-    process_citi, process_bou, build_big_statement
+    process_citi, process_bou, build_big_statement,
+    save_citi_identifiers, save_bou_identifiers
 )
 
 apply_style()
-top_nav()
-st.title(" Upload Files")
+st.set_page_config(layout="wide")
+#top_nav()
 
-# st.write("Upload the five Excel inputs used by the settlement tracker.")
+st.subheader("Upload Files")
 
-citi_file = st.file_uploader(
-    "1. Citibank Statement",
-    type=["xlsx", "xls"],
-    key="upload_citi"
-)
+citi_file = st.file_uploader("1. Citibank Statement", type=["xlsx", "xls"], key="upload_citi")
+bou_file = st.file_uploader("2. BOU Statement", type=["xlsx", "xls"], key="upload_bou")
+cashflow_file = st.file_uploader("3. Cash Flow", type=["xlsx", "xls"], key="upload_cashflow")
+citi_ids_file = st.file_uploader("4. Citi Identifiers (Optional)", type=["xlsx", "xls", "csv"], key="upload_citi_ids")
+bou_ids_file = st.file_uploader("5. BOU Identifiers (Optional)", type=["xlsx", "xls", "csv"], key="upload_bou_ids")
 
-bou_file = st.file_uploader(
-    "2. BOU Statement",
-    type=["xlsx", "xls"],
-    key="upload_bou"
-)
-
-cashflow_file = st.file_uploader(
-    "3. Cash Flow",
-    type=["xlsx", "xls"],
-    key="upload_cashflow"
-)
-
-citi_ids_file = st.file_uploader(
-    "4. Citi Identifiers",
-    type=["xlsx", "xls"],
-    key="upload_citi_ids"
-)
-
-bou_ids_file = st.file_uploader(
-    "5. BOU Identifiers",
-    type=["xlsx", "xls"],
-    key="upload_bou_ids"
-)
-
-if st.button(" Process Files", type="primary", use_container_width=True):
+if st.button("Process Files", type="primary", use_container_width=True):
     missing = []
     for name, f in [
         ("Citibank Statement", citi_file),
         ("BOU Statement", bou_file),
-        ("Cash Flow", cashflow_file),
-        ("Citi Identifiers", citi_ids_file),
-        ("BOU Identifiers", bou_ids_file),
+        ("Cash Flow", cashflow_file)
     ]:
         if f is None:
             missing.append(name)
 
     if missing:
-        st.error("Missing: " + ", ".join(missing))
+        st.error("Missing required statement files: " + ", ".join(missing))
         st.stop()
 
     try:
         with st.spinner("Processing settlement files..."):
-            citi_ids = process_citi_identifiers(citi_ids_file)
-            bou_ids = process_bou_identifiers(bou_ids_file)
+            # Update data/ directory directly if files are uploaded
+            if citi_ids_file is not None:
+                save_citi_identifiers(citi_ids_file)
+            if bou_ids_file is not None:
+                save_bou_identifiers(bou_ids_file)
+
+            citi_ids = process_citi_identifiers()
+            bou_ids = process_bou_identifiers()
+
             cashflow = process_cashflow(cashflow_file)
             citi = process_citi(citi_file, citi_ids)
             bou = process_bou(bou_file, bou_ids)
@@ -73,6 +55,10 @@ if st.button(" Process Files", type="primary", use_container_width=True):
             st.session_state.bou = bou
             st.session_state.big_statement = big
             st.session_state.processed = True
+
+            st.session_state.raw_citi_file = citi_file
+            st.session_state.raw_bou_file = bou_file
+            st.session_state.raw_cashflow_file = cashflow_file
 
         st.success("All files processed successfully.")
         st.write(f"Cash Flow: **{len(cashflow):,}** rows")

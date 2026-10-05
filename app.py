@@ -1,5 +1,5 @@
 import streamlit as st
-from src.utilities import apply_style, top_nav
+from src.utilities import apply_style#, top_nav
 
 st.set_page_config(
     page_title="Settlement Tracker",
@@ -9,7 +9,7 @@ st.set_page_config(
 )
 
 apply_style()
-top_nav()
+#top_nav()
 
 st.title("Settlement Tracker")
 st.subheader("Settlement reconciliation dashboard")
